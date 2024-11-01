@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subir Archivo</title>
+    <style>
+        #progress-container {
+            width: 100%;
+            background-color: #f3f3f3;
+            margin-top: 20px;
+        }
+        #progress-bar {
+            width: 0;
+            height: 30px;
+            background-color: green;
+            text-align: center;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>Subir Archivo CSV o Excel</h1>
+    <input type="file" id="fileInput" />
+    <button onclick="uploadFile()">Subir y Enviar</button>
+    <div id="result"></div>
+
+    <div id="progress-container">
+        <div id="progress-bar">0%</div>
+    </div>
+
+    <script>
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const resultDiv = document.getElementById('result');
+
+            if (fileInput.files.length === 0) {
+                resultDiv.innerHTML = 'Por favor, selecciona un archivo.';
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'resultado.json';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+
+                resultDiv.innerHTML = 'Archivo de resultados descargado.';
+            } catch (error) {
+                resultDiv.innerHTML = `Error: ${error.message}`;
+            }
+
+            // Iniciar la escucha de progreso
+            startProgressListener();
+        }
+
+        function startProgressListener() {
+            const eventSource = new EventSource('/progress');
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                const progressBar = document.getElementById('progress-bar');
+
+                const percent = (data.progress / data.total) * 100;
+                progressBar.style.width = percent + '%';
+                progressBar.textContent = Math.round(percent) + '%';
+            };
+
+            eventSource.onerror = function() {
+                eventSource.close();
+            };
+        }
+    </script>
+</body>
+</html>
