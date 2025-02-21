@@ -5,83 +5,58 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Subir Archivo</title>
     <style>
-        #progress-container {
-            width: 100%;
-            background-color: #f3f3f3;
-            margin-top: 20px;
-        }
-        #progress-bar {
-            width: 0;
-            height: 30px;
-            background-color: green;
-            text-align: center;
-            color: white;
-        }
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #333; }
+        #progress-bar { width: 0; height: 30px; background-color: #4caf50; text-align: center; color: white; line-height: 30px; transition: width 0.3s ease; }
+        #log-container { max-height: 200px; overflow-y: auto; background: #f9f9f9; padding: 10px; border-radius: 5px; }
+        button { padding: 10px 20px; background-color: #4caf50; color: white; border: none; cursor: pointer; }
     </style>
 </head>
 <body>
-    <h1>Subir Archivo CSV o Excel</h1>
-    <input type="file" id="fileInput" />
-    <button onclick="uploadFile()">Subir y Enviar</button>
+    <h1>Subir Archivo CSV</h1>
+    <input type="file" id="fileInput" accept=".csv" />
+    <button onclick="uploadFile()">Subir y Procesar</button>
+    <div id="progress-container"><div id="progress-bar">0%</div></div>
+    <div id="log-container"><h3>Logs:</h3><ul id="logs"></ul></div>
     <div id="result"></div>
-
-    <div id="progress-container">
-        <div id="progress-bar">0%</div>
-    </div>
 
     <script>
         async function uploadFile() {
             const fileInput = document.getElementById('fileInput');
+            const progressBar = document.getElementById('progress-bar');
+            const logs = document.getElementById('logs');
             const resultDiv = document.getElementById('result');
 
-            if (fileInput.files.length === 0) {
-                resultDiv.innerHTML = 'Por favor, selecciona un archivo.';
-                return;
-            }
+            if (!fileInput.files.length) return alert('Selecciona un archivo.');
 
-            const file = fileInput.files[0];
             const formData = new FormData();
-            formData.append('file', file);
+            formData.append('file', fileInput.files[0]);
 
-            try {
-                const response = await fetch('/upload', {
-                    method: 'POST',
-                    body: formData
-                });
+            logs.innerHTML = '';
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
 
-                const blob = await response.blob();
-                const url = window.URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = 'resultado.json';
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-
-                resultDiv.innerHTML = 'Archivo de resultados descargado.';
-            } catch (error) {
-                resultDiv.innerHTML = `Error: ${error.message}`;
-            }
-
-            // Iniciar la escucha de progreso
-            startProgressListener();
-        }
-
-        function startProgressListener() {
-            const eventSource = new EventSource('/progress');
-
+            const eventSource = new EventSource('/stream');
             eventSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
-                const progressBar = document.getElementById('progress-bar');
-
-                const percent = (data.progress / data.total) * 100;
-                progressBar.style.width = percent + '%';
-                progressBar.textContent = Math.round(percent) + '%';
+                if (data.done) {
+                    eventSource.close();
+                    resultDiv.innerHTML = `<a href="${data.file}" download="resultados.csv">Descargar Resultados (CSV)</a>`;
+                } else {
+                    progressBar.style.width = data.percent + '%';
+                    progressBar.textContent = data.percent + '%';
+                    const li = document.createElement('li');
+                    li.textContent = data.log;
+                    logs.appendChild(li);
+                }
             };
 
             eventSource.onerror = function() {
                 eventSource.close();
+                alert('Error en la conexión con el servidor.');
             };
+
+            await fetch('/upload', { method: 'POST', body: formData });
         }
     </script>
 </body>
