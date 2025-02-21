@@ -1,137 +1,94 @@
+// app.js (actualizado)
 const express = require('express');
 const multer = require('multer');
 const axios = require('axios');
 const csv = require('csv-parser');
-const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
-const { Parser } = require('json2csv'); // Importamos json2csv
+const { Parser } = require('json2csv');
+const config = require('./config');
 
 const app = express();
-const port = 3001;
+const port = config.server.port;
 
-const upload = multer({ dest: 'uploads/' });
+const uploadFolder = path.join(__dirname, config.server.uploadFolder);
+if (!fs.existsSync(uploadFolder)) {
+    fs.mkdirSync(uploadFolder, { recursive: true });
+}
 
-app.use(express.static('public')); // Para servir archivos estáticos
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadFolder);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
 
+const upload = multer({ storage });
+app.use(express.static('public'));
+
+let logs = [];
 let progress = 0;
 let totalRequests = 0;
 
-app.get('/progress', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+app.get('/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
 
-  const interval = setInterval(() => {
-    res.write(`data: ${JSON.stringify({ progress, total: totalRequests })}\n\n`);
-  }, 350); // Enviar actualizaciones cada segundo
+    const sendLogs = () => {
+        while (logs.length > 0) {
+            res.write(`data: ${JSON.stringify(logs.shift())}\n\n`);
+        }
+    };
 
-  req.on('close', () => {
-    clearInterval(interval);
-  });
+    const interval = setInterval(sendLogs, 500);
+    req.on('close', () => clearInterval(interval));
 });
-
-// Función para hacer un delay
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.post('/upload', upload.single('file'), async (req, res) => {
-  const filePath = path.join(__dirname, 'uploads', req.file.filename);
-  const results = [];
+    const filePath = path.join(uploadFolder, req.file.filename);
+    if (!fs.existsSync(filePath)) return res.status(400).json({ error: 'Error al subir el archivo' });
 
-  try {
-    if (req.file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || req.file.mimetype === 'application/vnd.ms-excel') {
-      // Leer archivo Excel
-      const workbook = XLSX.readFile(filePath);
-      const sheet_name_list = workbook.SheetNames;
-      const data = XLSX.utils.sheet_to_json(workbook.Sheets[sheet_name_list[0]]);
-
-      totalRequests = data.length;
-      await processRows(data, results);
-    } else if (req.file.mimetype === 'text/csv') {
-      // Leer archivo CSV
-      const csvData = [];
-      fs.createReadStream(filePath)
-        .pipe(csv())
-        .on('data', (data) => {
-          csvData.push(data);
-        })
+    const results = [];
+    const rows = [];
+    fs.createReadStream(filePath)
+        .pipe(csv({ separator: ';' }))
+        .on('data', (data) => rows.push(data))
         .on('end', async () => {
-          totalRequests = csvData.length; // Asignamos el totalRequests después de leer el archivo CSV
-          await processRows(csvData, results);
+            totalRequests = rows.length;
+            for (const row of rows) {
+                progress++;
+                const result = await makeRequest(row);
+                results.push(result);
+                logs.push({ log: `Procesado ${progress}/${totalRequests}: Código ${result.codigoRespuesta}, Descripción: ${result.descripcion}`, percent: Math.round((progress / totalRequests) * 100) });
+            }
 
-          // Convertir los resultados a CSV
-          const json2csvParser = new Parser();
-          const csvDataString = json2csvParser.parse(results);
-
-          // Devolver el archivo CSV generado al cliente
-          res.header('Content-Type', 'text/csv');
-          res.attachment('resultados.csv');
-          res.send(csvDataString);
+            const json2csvParser = new Parser({ delimiter: ';' });
+            const csvDataString = json2csvParser.parse(results);
+            fs.writeFileSync(path.join(uploadFolder, 'resultados.csv'), csvDataString);
+            logs.push({ done: true, file: '/uploads/resultados.csv' });
         });
-    } else {
-      return res.status(400).json({ message: 'Formato de archivo no soportado' });
-    }
 
-    // Limpiar archivos temporales si es necesario
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+    res.json({ message: 'Procesando archivo...' });
 });
 
-async function processRows(rows, results) {
-  let index = 0;
-  for (const row of rows) {
-    console.log(`Procesando registro ${index + 1} de ${rows.length}`);
-    await makeRequest(row, results);
-    await delay(350); // Delay de 500 ms
-    index++;
-  }
-}
-
-async function makeRequest(row, results) {
-  const options = {
-    method: 'POST',
-    url: 'https://orquestador-pasarelas-gateway-alcance.crediservices.credibanco.com/credibanco/api/pasarelas/orquestador/v1/externo/notificaciones/terminales',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Basic Y3JlZGliYW5jb3BydWViYXM6Q29sb21iaWEyMyo='
-    },
-    data: {
-      "pasarela": row.pasarela,
-      "codigoUnico": row.codigoUnico,
-      "tipoComercio": "NORMAL",
-      "cantidadTerminales": 1
+async function makeRequest(row) {
+    try {
+        const response = await axios.post(config.api.url, {
+            pasarela: row.pasarela,
+            codigoUnico: row.codigoUnico,
+            tipoComercio: 'NORMAL',
+            cantidadTerminales: 1
+        }, {
+            headers: { 'Content-Type': 'application/json', 'Authorization': config.api.authorization }
+        });
+        return { ...row, codigoRespuesta: response.data.codigoRespuesta, descripcion: response.data.descripcion };
+    } catch (error) {
+        return { ...row, codigoRespuesta: 'ERROR', descripcion: error.message };
     }
-  };
-
-  try {
-    const response = await axios(options);
-    let ahora = new Date();
-    let fecha = ahora.getDate() + '/' + (ahora.getMonth() + 1) + '/' + ahora.getFullYear();
-    let hora = ahora.getHours() + ':' +  (ahora.getMinutes() < 10 ? '0' : '') + ahora.getMinutes() + ':' + (ahora.getSeconds() < 10 ? '0' : '') + ahora.getSeconds();
-    results.push({
-      pasarela: row.pasarela,
-      codigoUnico: row.codigoUnico,
-      terminalesCreadas: response.data.terminalesCreadas ? response.data.terminalesCreadas.join(', ') : '',
-      codigoRespuesta: response.data.codigoRespuesta || '',
-      descripcion: response.data.descripcion || '',
-      fecha: fecha || '',
-      hora: hora || ''
-    });
-    console.log(`Respuesta para ${row.pasarela} - ${row.codigoUnico}:`, response.data);
-  } catch (error) {
-    results.push({
-      pasarela: row.pasarela,
-      codigoUnico: row.codigoUnico,
-      terminalesCreadas: '',
-      codigoRespuesta: '',
-      descripcion: `Error: ${error.message}`
-    });
-    console.error(`Error para ${row.pasarela} - ${row.codigoUnico}:`, error.message);
-  }
-  progress++;
 }
 
-app.listen(port, () => {
-  console.log(`Servidor corriendo en http://localhost:${port}`);
-});
+app.listen(port, () => console.log(`Servidor en http://localhost:${port}`));
