@@ -28,10 +28,12 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 app.use(express.static('public'));
+app.use('/uploads', express.static(uploadFolder));
 
 let logs = [];
 let progress = 0;
 let totalRequests = 0;
+let requestTimes = [];
 
 app.get('/stream', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
@@ -63,12 +65,16 @@ app.post('/upload', upload.single('file'), async (req, res) => {
                 progress++;
                 const result = await makeRequest(row);
                 results.push(result);
-                logs.push({ log: `Procesado ${progress}/${totalRequests}: Código ${result.codigoRespuesta}, Descripción: ${result.descripcion}`, percent: Math.round((progress / totalRequests) * 100) });
+                logs.push({ log: `Procesado ${progress}/${totalRequests}: Código ${result.codigoRespuesta}, Descripción: ${result.descripcion}, Terminales: ${result.terminalesCreadas || 'N/A'}, Tiempo: ${result.tiempo}ms`, percent: Math.round((progress / totalRequests) * 100) });
             }
+
+            const avgTime = requestTimes.reduce((a, b) => a + b, 0) / requestTimes.length;
+            logs.push({ log: `Tiempo promedio por petición: ${avgTime.toFixed(2)}ms` });
 
             const json2csvParser = new Parser({ delimiter: ';' });
             const csvDataString = json2csvParser.parse(results);
-            fs.writeFileSync(path.join(uploadFolder, 'resultados.csv'), csvDataString);
+            const resultFilePath = path.join(uploadFolder, 'resultados.csv');
+            fs.writeFileSync(resultFilePath, csvDataString);
             logs.push({ done: true, file: '/uploads/resultados.csv' });
         });
 
@@ -76,6 +82,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 async function makeRequest(row) {
+    const startTime = Date.now();
     try {
         const response = await axios.post(config.api.url, {
             pasarela: row.pasarela,
@@ -85,9 +92,27 @@ async function makeRequest(row) {
         }, {
             headers: { 'Content-Type': 'application/json', 'Authorization': config.api.authorization }
         });
-        return { ...row, codigoRespuesta: response.data.codigoRespuesta, descripcion: response.data.descripcion };
+        const tiempo = Date.now() - startTime;
+        requestTimes.push(tiempo);
+        return {
+            pasarela: row.pasarela,
+            codigoUnico: row.codigoUnico,
+            terminalesCreadas: response.data.terminalesCreadas ? response.data.terminalesCreadas.join(', ') : 'N/A',
+            codigoRespuesta: response.data.codigoRespuesta || '',
+            descripcion: response.data.descripcion || '',
+            tiempo
+        };
     } catch (error) {
-        return { ...row, codigoRespuesta: 'ERROR', descripcion: error.message };
+        const tiempo = Date.now() - startTime;
+        requestTimes.push(tiempo);
+        return {
+            pasarela: row.pasarela,
+            codigoUnico: row.codigoUnico,
+            terminalesCreadas: '',
+            codigoRespuesta: 'ERROR',
+            descripcion: error.message,
+            tiempo
+        };
     }
 }
 
